@@ -1,4 +1,4 @@
-// End-to-end smoke test with a fake Claude API and a fake Upstash Redis. No network, no key needed.
+// End-to-end smoke test with a fake Claude API and a fake Supabase. No network, no key needed.
 // Usage: node scripts/smoke-test.mjs
 import http from "node:http";
 import { spawn } from "node:child_process";
@@ -25,25 +25,27 @@ const fakeClaude = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ stop_reason: "end_turn", content: [{ type: "text", text: reply }] }));
 }).listen(0);
 
-// --- fake Upstash REST -----------------------------------------------------
-const kv = new Map(); const sets = new Map();
+// --- fake Supabase (PostgREST subset) --------------------------------------
+const docs = new Map(); const counters = new Map();
 const fakeRedis = http.createServer(async (req, res) => {
-  const [cmd, ...args] = JSON.parse(await readBody(req));
-  let result = null;
-  switch (cmd) {
-    case "GET": result = kv.has(args[0]) ? kv.get(args[0]) : null; break;
-    case "SET": kv.set(args[0], args[1]); result = "OK"; break;
-    case "DEL": result = kv.delete(args[0]) ? 1 : 0; break;
-    case "MGET": result = args.map((k) => (kv.has(k) ? kv.get(k) : null)); break;
-    case "SADD": { if (!sets.has(args[0])) sets.set(args[0], new Set()); const s = sets.get(args[0]); const had = s.has(args[1]); s.add(args[1]); result = had ? 0 : 1; break; }
-    case "SREM": result = sets.get(args[0])?.delete(args[1]) ? 1 : 0; break;
-    case "SMEMBERS": result = [...(sets.get(args[0]) || [])]; break;
-    case "INCR": { const n = (Number(kv.get(args[0])) || 0) + 1; kv.set(args[0], String(n)); result = n; break; }
-    case "EXPIRE": result = 1; break;
-    default: res.end(JSON.stringify({ error: "unknown " + cmd })); return;
-  }
+  const u = new URL(req.url, "http://x");
+  const raw = await readBody(req);
+  const body = raw ? JSON.parse(raw) : null;
+  const q = (k) => { const v = u.searchParams.get(k); return v && v.startsWith("eq.") ? v.slice(3) : null; };
+  let out = null;
+  if (req.headers.authorization !== "Bearer service-key") { res.statusCode = 401; return res.end(JSON.stringify({ message: "bad key" })); }
+  if (u.pathname === "/rest/v1/bsp_docs") {
+    if (req.method === "GET") {
+      const path = q("path"), col = q("collection");
+      const rows = [...docs.values()].filter((r) => (path ? r.path === path : r.collection === col));
+      out = rows.map((r) => (u.searchParams.get("select") === "data" ? { data: r.data } : { id: r.id, data: r.data }));
+    } else if (req.method === "POST") { docs.set(body.path, body); res.statusCode = 201; }
+    else if (req.method === "DELETE") { docs.delete(q("path")); res.statusCode = 204; }
+  } else if (u.pathname === "/rest/v1/rpc/bsp_bump") {
+    const n = (counters.get(body.k) || 0) + 1; counters.set(body.k, n); out = n;
+  } else { res.statusCode = 404; out = { message: "unknown " + u.pathname }; }
   res.setHeader("content-type", "application/json");
-  res.end(JSON.stringify({ result }));
+  res.end(out === null ? "" : JSON.stringify(out));
 }).listen(0);
 
 await new Promise((r) => setTimeout(r, 100));
@@ -52,8 +54,8 @@ const env = {
   PORT: "0",
   ANTHROPIC_API_KEY: "sk-test",
   ANTHROPIC_BASE_URL: `http://127.0.0.1:${fakeClaude.address().port}`,
-  UPSTASH_REDIS_REST_URL: `http://127.0.0.1:${fakeRedis.address().port}`,
-  UPSTASH_REDIS_REST_TOKEN: "t",
+  SUPABASE_URL: `http://127.0.0.1:${fakeRedis.address().port}`,
+  SUPABASE_SERVICE_ROLE_KEY: "service-key",
   OWNER_KEY: "owner-secret",
   SAMPLE_PER_HOUR: "3",
 };

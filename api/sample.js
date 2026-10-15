@@ -4,7 +4,7 @@
 // Errors: { code, message } with codes the page already knows how to show.
 
 import { readJson, send, fail, checkAccess, clientIp } from "../lib/http.js";
-import { hasRedis, bump } from "../lib/store.js";
+import { hasDb, bump } from "../lib/store.js";
 
 const MODELS = {
   default: process.env.MODEL_DEFAULT || "claude-sonnet-5-5",
@@ -38,7 +38,7 @@ export default async function handler(req, res) {
   }
   if (bytes > 6_000_000) return fail(res, 413, "prompt_too_large", "Images too large.");
 
-  if (hasRedis && PER_HOUR > 0) {
+  if (hasDb && PER_HOUR > 0) {
     try {
       const hour = Math.floor(Date.now() / 3_600_000);
       const n = await bump(`bsp:rl:${clientIp(req)}:${hour}`, 3700);

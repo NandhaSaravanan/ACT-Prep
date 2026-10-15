@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot the page in headless Chromium against the dev server (fake Claude + fake Redis from smoke-test)
+"""Boot the page in headless Chromium against the dev server (fake Claude + fake Supabase from smoke-test)
 and check that the shim takes the app into cloud mode, the settings sync panel renders, and a
 sample call round-trips through /api/sample. Run: python3 -I scripts/browser-test.py"""
 import http.server, json, os, re, subprocess, sys, threading, time
@@ -18,22 +18,28 @@ class FakeClaude(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(out))); self.end_headers(); self.wfile.write(out)
     def log_message(self, *a): pass
 
-KV, SETS = {}, {}
-class FakeRedis(http.server.BaseHTTPRequestHandler):
-    def do_POST(self):
-        cmd, *args = json.loads(self.rfile.read(int(self.headers["content-length"])))
-        res = None
-        if cmd == "GET": res = KV.get(args[0])
-        elif cmd == "SET": KV[args[0]] = args[1]; res = "OK"
-        elif cmd == "DEL": res = 1 if KV.pop(args[0], None) is not None else 0
-        elif cmd == "MGET": res = [KV.get(k) for k in args]
-        elif cmd == "SADD": s = SETS.setdefault(args[0], set()); res = 0 if args[1] in s else 1; s.add(args[1])
-        elif cmd == "SREM": res = 1 if args[1] in SETS.get(args[0], set()) else 0; SETS.get(args[0], set()).discard(args[1])
-        elif cmd == "SMEMBERS": res = sorted(SETS.get(args[0], set()))
-        elif cmd == "INCR": KV[args[0]] = str(int(KV.get(args[0], 0)) + 1); res = int(KV[args[0]])
-        elif cmd == "EXPIRE": res = 1
-        out = json.dumps({"result": res}).encode()
-        self.send_response(200); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(out))); self.end_headers(); self.wfile.write(out)
+DOCS, COUNTERS = {}, {}
+class FakeRedis(http.server.BaseHTTPRequestHandler):  # fake Supabase (PostgREST subset)
+    def _go(self, method):
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(self.path); q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        n = int(self.headers.get("content-length") or 0)
+        body = json.loads(self.rfile.read(n)) if n else None
+        out, code = None, 200
+        eqv = lambda k: q[k][3:] if k in q and q[k].startswith("eq.") else None
+        if u.path == "/rest/v1/bsp_docs":
+            if method == "GET":
+                rows = [r for r in DOCS.values() if (r["path"] == eqv("path") if "path" in q else r["collection"] == eqv("collection"))]
+                out = [{"data": r["data"]} if q.get("select") == "data" else {"id": r["id"], "data": r["data"]} for r in rows]
+            elif method == "POST": DOCS[body["path"]] = body; code = 201
+            elif method == "DELETE": DOCS.pop(eqv("path"), None); code = 204
+        elif u.path == "/rest/v1/rpc/bsp_bump":
+            COUNTERS[body["k"]] = COUNTERS.get(body["k"], 0) + 1; out = COUNTERS[body["k"]]
+        data = b"" if out is None else json.dumps(out).encode()
+        self.send_response(code); self.send_header("content-type", "application/json"); self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def do_GET(self): self._go("GET")
+    def do_POST(self): self._go("POST")
+    def do_DELETE(self): self._go("DELETE")
     def log_message(self, *a): pass
 
 claude_srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeClaude)
@@ -42,7 +48,7 @@ for s in (claude_srv, redis_srv): threading.Thread(target=s.serve_forever, daemo
 
 env = dict(os.environ, PORT="0", ANTHROPIC_API_KEY="sk-test",
            ANTHROPIC_BASE_URL=f"http://127.0.0.1:{claude_srv.server_port}",
-           UPSTASH_REDIS_REST_URL=f"http://127.0.0.1:{redis_srv.server_port}", UPSTASH_REDIS_REST_TOKEN="t",
+           SUPABASE_URL=f"http://127.0.0.1:{redis_srv.server_port}", SUPABASE_SERVICE_ROLE_KEY="service-key",
            OWNER_KEY="owner-secret")
 proc = subprocess.Popen(["node", str(ROOT / "scripts/dev-server.mjs")], env=env, stdout=subprocess.PIPE, text=True)
 line = proc.stdout.readline()

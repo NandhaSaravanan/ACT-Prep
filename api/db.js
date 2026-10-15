@@ -15,7 +15,7 @@
 // Visitors are anonymous; the uid is a random id the browser generated and keeps (its "sync code").
 
 import { readJson, send, fail, checkAccess, isOwner, clientUid } from "../lib/http.js";
-import { hasRedis, getDoc, setDoc, deleteDoc, listDocs } from "../lib/store.js";
+import { hasDb, getDoc, setDoc, deleteDoc, listDocs } from "../lib/store.js";
 import { randomBytes } from "node:crypto";
 
 const SEG = /^[A-Za-z0-9_.-]{1,80}$/;
@@ -28,8 +28,8 @@ export default async function handler(req, res) {
   if (!body || typeof body.op !== "string") return fail(res, 400, "bad_request");
   const owner = isOwner(req);
 
-  if (body.op === "ping") return send(res, 200, { ok: hasRedis, owner });
-  if (!hasRedis) return fail(res, 503, "db_unavailable", "No Redis store is configured.");
+  if (body.op === "ping") return send(res, 200, { ok: hasDb, owner });
+  if (!hasDb) return fail(res, 503, "db_unavailable", "No database is configured (Supabase).");
 
   const uid = clientUid(req);
 
